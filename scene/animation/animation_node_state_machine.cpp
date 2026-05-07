@@ -904,10 +904,18 @@ AnimationNode::NodeTimeInfo AnimationNodeStateMachinePlayback::_process(Animatio
 		pi = p_playback_info;
 		pi.weight = fade_blend_inv;
 
-		// FIX V2: If we hold the ghost frame at 'End', freeze its time.
-		if (current == SceneStringName(End)) {
-			pi.delta = 0.0;
-		}
+		// FIX V7: Removed the previous "freeze ghost at End" (pi.delta = 0.0).
+		// Freezing kept the ghost's `remain` constant forever, which broke any
+		// parent state machine that uses an at_end transition out of this
+		// nested SM, the parent saw a frozen non-zero remain and never
+		// reached the `remain <= xfade` condition. Letting the ghost tick
+		// naturally is also visually correct: at_end fires when
+		// `remain <= xfade`, so the ghost ticks down its last `xfade` seconds
+		// during the cross-fade and ends exactly at the natural end frame
+		// (for non-looping animations, position then sticks at length and
+		// remain stays at 0). The T-pose protection is still provided by
+		// FIX V2's `fade_blend_inv = 1.0` above, which gives the ghost full
+		// rendering weight, plus FIX V5's `last_rendered_state` fallback.
 
 		if (_reset_request_for_fading_from) {
 			_reset_request_for_fading_from = false;
