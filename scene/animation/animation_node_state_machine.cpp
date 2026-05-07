@@ -971,15 +971,20 @@ bool AnimationNodeStateMachinePlayback::_transition_to_next_recursive(AnimationN
 		bool is_transition_to_end = (next.node == SceneStringName(End));
 		bool is_from_start = (current == SceneStringName(Start));
 
-		// transition_path.size() > 2 means we already hopped nodes in this exact frame (tick).
-		// We CANNOT fade from a node that has 0 rendered frames!
-		bool is_intermediate_hop = (transition_path.size() > 2);
+		// FIX V6: Removed the previous is_intermediate_hop guard. Multi-hop
+		// transitions in a single frame (e.g. travel paths Start -> A -> B
+		// resolved via _make_travel_path) are NOT inherently broken. The
+		// "ghost" state is blended live in _process() via blend_node(), so an
+		// intermediate state that has not been rendered yet still produces a
+		// valid pose. The previous guard incorrectly suppressed xfade for
+		// valid SYNC and other mid-frame transitions, causing the second hop
+		// to snap instead of cross-fading.
+		bool current_is_valid = (!is_from_start && current != SceneStringName(End) && current != StringName());
 
-		// A state is only a valid ghost if it has actually been rendered.
-		bool current_is_valid = (!is_from_start && !is_intermediate_hop && current != SceneStringName(End) && current != StringName());
-
-		// FIX V4: Never fade from 'Start' or an intermediate unrendered node.
-		float actual_xfade = (is_from_start || is_intermediate_hop) ? 0.0 : next.xfade;
+		// FIX V4/V6: Only the Start state must never act as a fade source —
+		// it has no animation to render. All other states (including
+		// intermediates not yet rendered this frame) are safe ghosts.
+		float actual_xfade = is_from_start ? 0.0 : next.xfade;
 
 		// FIX V5: When transitioning to End, choose a valid ghost source.
 		// Prefer the current state if it was actually rendered; otherwise fall
