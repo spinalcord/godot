@@ -272,6 +272,10 @@ class AnimationNodeStateMachinePlayback : public Resource {
 
 	AnimationNode::NodeTimeInfo fadeing_from_nti;
 	StringName fading_from;
+	// FIX V5: Last state that was actually rendered with non-zero weight,
+	// used as a fallback ghost when transitioning to End from an unrendered
+	// state (e.g. Start, intermediate hops in the same frame).
+	StringName last_rendered_state;
 	float fading_time = 0.0;
 	float fading_pos = 0.0;
 
@@ -351,3 +355,4 @@ public:
 
 	AnimationNodeStateMachinePlayback();
 };
+

@@ -866,7 +866,9 @@ AnimationNode::NodeTimeInfo AnimationNodeStateMachinePlayback::_process(Animatio
 	fade_blend = Math::is_zero_approx(fade_blend) ? CMP_EPSILON : fade_blend;
 	if (is_start_of_group) {
 		fade_blend = 1.0;
-	} else if (is_end_of_group) {
+	} else if (is_end_of_group || current == SceneStringName(End)) {
+		// FIX V2: The End node never produces output. Force fade_blend to 0.0
+		// so the ghost frame (fading_from) correctly receives full rendering weight.
 		fade_blend = 0.0;
 	}
 
@@ -881,29 +883,46 @@ AnimationNode::NodeTimeInfo AnimationNodeStateMachinePlayback::_process(Animatio
 	AnimationNodeInstance *other_instance = p_instance.get_child_instance_by_path_or_null(current);
 	current_nti = p_state_machine->blend_node(p_process_state, p_instance, other_instance, pi, AnimationNode::FILTER_IGNORE, true, p_test_only); // Blend values must be more than CMP_EPSILON to process discrete keys in edge.
 
+	// FIX V5: Remember the last state that produced actual output. This is the
+	// only safe fallback ghost when we later need to transition to End from a
+	// state that has no rendered frame (Start, intermediate hop, etc.).
+	if (current != SceneStringName(Start) && current != SceneStringName(End) && current != StringName() && fade_blend > CMP_EPSILON) {
+		last_rendered_state = current;
+	}
+
 	// Cross-fade process.
+
 	if (fading_from != StringName()) {
 		double fade_blend_inv = 1.0 - fade_blend;
 		fade_blend_inv = Math::is_zero_approx(fade_blend_inv) ? CMP_EPSILON : fade_blend_inv;
 		if (is_start_of_group) {
 			fade_blend_inv = 0.0;
-		} else if (is_end_of_group) {
+		} else if (is_end_of_group || current == SceneStringName(End)) {
 			fade_blend_inv = 1.0;
 		}
 
 		pi = p_playback_info;
 		pi.weight = fade_blend_inv;
+
+		// FIX V2: If we hold the ghost frame at 'End', freeze its time.
+		if (current == SceneStringName(End)) {
+			pi.delta = 0.0;
+		}
+
 		if (_reset_request_for_fading_from) {
 			_reset_request_for_fading_from = false;
 			pi.time = 0;
 			pi.seeked = true;
 		}
 		AnimationNodeInstance *fading_from_instance = p_instance.get_child_instance_by_path_or_null(fading_from);
-		fadeing_from_nti = p_state_machine->blend_node(p_process_state, p_instance, fading_from_instance, pi, AnimationNode::FILTER_IGNORE, true, p_test_only); // Blend values must be more than CMP_EPSILON to process discrete keys in edge.
+		fadeing_from_nti = p_state_machine->blend_node(p_process_state, p_instance, fading_from_instance, pi, AnimationNode::FILTER_IGNORE, true, p_test_only);
 
 		if (Animation::is_greater_or_equal_approx(fading_pos, fading_time)) {
 			// Finish fading.
-			_clear_fading(p_process_state, p_state_machine, fading_from);
+			// FIX V2: Do NOT clear the ghost if we rely on it to bridge the transition to the parent.
+			if (current != SceneStringName(End)) {
+				_clear_fading(p_process_state, p_state_machine, fading_from);
+			}
 		}
 	}
 
@@ -949,11 +968,43 @@ bool AnimationNodeStateMachinePlayback::_transition_to_next_recursive(AnimationN
 		transition_path.push_back(next.node);
 
 		// Setting for fading.
-		if (next.xfade) {
-			// Time to fade.
-			fading_from = current;
-			fading_time = next.xfade;
+		bool is_transition_to_end = (next.node == SceneStringName(End));
+		bool is_from_start = (current == SceneStringName(Start));
+
+		// transition_path.size() > 2 means we already hopped nodes in this exact frame (tick).
+		// We CANNOT fade from a node that has 0 rendered frames!
+		bool is_intermediate_hop = (transition_path.size() > 2);
+
+		// A state is only a valid ghost if it has actually been rendered.
+		bool current_is_valid = (!is_from_start && !is_intermediate_hop && current != SceneStringName(End) && current != StringName());
+
+		// FIX V4: Never fade from 'Start' or an intermediate unrendered node.
+		float actual_xfade = (is_from_start || is_intermediate_hop) ? 0.0 : next.xfade;
+
+		// FIX V5: When transitioning to End, choose a valid ghost source.
+		// Prefer the current state if it was actually rendered; otherwise fall
+		// back to the last rendered state we tracked in _process(). This
+		// guarantees that End is never reached without a frozen pose to hold.
+		StringName ghost_source = current_is_valid ? current : StringName();
+		if (is_transition_to_end && ghost_source == StringName() &&
+				last_rendered_state != StringName() &&
+				p_state_machine->states.has(last_rendered_state) &&
+				last_rendered_state != SceneStringName(End)) {
+			ghost_source = last_rendered_state;
+		}
+		bool has_ghost = ghost_source != StringName();
+
+		if (actual_xfade > 0.0 || (is_transition_to_end && has_ghost)) {
+			// Time to fade. Or if transitioning to End, keep a previous state
+			// as a ghost to prevent T-Pose. Use the resolved ghost_source so
+			// that a Start->End or multi-hop->End path still has a valid pose.
+			fading_from = has_ghost ? ghost_source : current;
+			fading_time = actual_xfade;
 			fading_pos = 0;
+
+			if (is_transition_to_end && actual_xfade == 0.0) {
+				print_line("SM DEBUG: Freezing '" + String(fading_from) + "' at End to prevent T-Pose.");
+			}
 		} else {
 			if (reset_request) {
 				// There is no possibility of processing doubly. Now we can apply reset actually in here.
@@ -1901,3 +1952,4 @@ AnimationNodeStateMachine::AnimationNodeStateMachine() {
 	end.position = Vector2(900, 100);
 	states[SceneStringName(End)] = end;
 }
+
